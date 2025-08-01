@@ -82,13 +82,13 @@ def create_train_state(config: TrainConfig, key: jax.random.PRNGKey, total_steps
 
 
 @eqx.filter_jit
-def train_step(state: TrainState, batch, optimizer, lr_schedule, batch_size):
+def train_step(state: TrainState, batch, optimizer):
     carry = state.carry or state.model.initial_carry(batch)
     step_key, next_key = jax.random.split(state.key)
 
     def loss_fn(model, carry, batch, key):
         new_carry, loss_output = model(carry, batch, key=key, is_training=True)
-        return loss_output.loss / batch_size, (new_carry, loss_output)
+        return loss_output.loss / batch["inputs"].shape[0], (new_carry, loss_output)
 
     (loss, (new_carry, loss_output)), grads = eqx.filter_value_and_grad(
         loss_fn, has_aux=True
@@ -100,9 +100,7 @@ def train_step(state: TrainState, batch, optimizer, lr_schedule, batch_size):
     new_state = TrainState(
         new_model, new_opt_state, new_carry, state.step + 1, next_key
     )
-    lr = lr_schedule(state.step)
     metrics = {f"train/{k}": v for k, v in loss_output.metrics.items()}
-    metrics["train/lr"] = lr
     return new_state, metrics
 
 
@@ -157,12 +155,9 @@ def main(config: TrainConfig):
         test_set_mode=True,
     )
     metadata = train_loader.metadata
-    if config.seq_len is None:
-        config.seq_len = metadata.seq_len
-    if config.vocab_size is None:
-        config.vocab_size = metadata.vocab_size
-    if config.num_puzzle_identifiers is None:
-        config.num_puzzle_identifiers = metadata.num_puzzle_identifiers
+    config.seq_len = metadata.seq_len
+    config.vocab_size = metadata.vocab_size
+    config.num_puzzle_identifiers = metadata.num_puzzle_identifiers
 
     total_steps = int(
         config.epochs
@@ -189,9 +184,9 @@ def main(config: TrainConfig):
             if state.step >= total_steps:
                 break
 
-            state, metrics = train_step(
-                state, batch, optimizer, lr_schedule, config.global_batch_size
-            )
+            state, metrics = train_step(state, batch, optimizer)
+            lr = lr_schedule(state.step - 1)
+            metrics["train/lr"] = lr
             wandb.log(metrics, step=state.step)
             pbar.update(1)
 

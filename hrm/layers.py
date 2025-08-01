@@ -7,13 +7,11 @@ from typing import Optional, Tuple
 
 
 def rms_norm(x: jnp.ndarray, eps: float = 1e-5) -> jnp.ndarray:
-    """RMS normalization."""
     variance = jnp.mean(x**2, axis=-1, keepdims=True)
     return x * jax.lax.rsqrt(variance + eps)
 
 
 def rotate_half(x: jnp.ndarray) -> jnp.ndarray:
-    """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return jnp.concatenate([-x2, x1], axis=-1)
@@ -22,13 +20,13 @@ def rotate_half(x: jnp.ndarray) -> jnp.ndarray:
 def apply_rotary_pos_emb(
     q: jnp.ndarray, k: jnp.ndarray, cos: jnp.ndarray, sin: jnp.ndarray
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Apply rotary position embeddings to queries and keys."""
     q_embed = (q * cos[..., None, :]) + (rotate_half(q) * sin[..., None, :])
     k_embed = (k * cos[..., None, :]) + (rotate_half(k) * sin[..., None, :])
     return q_embed, k_embed
 
 
 class RotaryEmbedding(eqx.Module):
+    # TODO
     cos_cached: jnp.ndarray = eqx.static_field()
     sin_cached: jnp.ndarray =  eqx.static_field()
 

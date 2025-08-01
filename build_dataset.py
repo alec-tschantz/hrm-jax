@@ -10,7 +10,7 @@ from tqdm import tqdm
 from huggingface_hub import hf_hub_download
 
 
-class PuzzleDatasetMetadata(BaseModel):
+class DatasetMetadata(BaseModel):
     pad_id: int
     ignore_label_id: Optional[int]
     blank_identifier_id: int
@@ -27,11 +27,11 @@ class PuzzleDatasetMetadata(BaseModel):
 
 class DataProcessConfig(BaseModel):
     source_repo: str = "sapientinc/sudoku-extreme"
-    output_dir: str = "data/sudoku-extreme-full"
+    output_dir: str = "data/sudoku-extreme-1k-aug-1000"
 
-    subsample_size: Optional[int] = None
+    num_aug: int = 1000
+    subsample_size: Optional[int] = 1000
     min_difficulty: Optional[int] = None
-    num_aug: int = 0
 
 
 def shuffle_sudoku(board: np.ndarray, solution: np.ndarray):
@@ -159,8 +159,7 @@ def convert_subset(set_name: str, config: DataProcessConfig):
         "puzzle_identifiers": np.array(results["puzzle_identifiers"], dtype=np.int32),
     }
 
-    # Metadata
-    metadata = PuzzleDatasetMetadata(
+    metadata = DatasetMetadata(
         seq_len=81,
         vocab_size=10 + 1,  # PAD + "0" ... "9"
         pad_id=0,
@@ -172,18 +171,15 @@ def convert_subset(set_name: str, config: DataProcessConfig):
         sets=["all"],
     )
 
-    # Save metadata as JSON.
     save_dir = os.path.join(config.output_dir, set_name)
     os.makedirs(save_dir, exist_ok=True)
 
     with open(os.path.join(save_dir, "dataset.json"), "w") as f:
         json.dump(metadata.model_dump(), f)
 
-    # Save data
     for k, v in results.items():
         np.save(os.path.join(save_dir, f"all__{k}.npy"), v)
 
-    # Save IDs mapping (for visualization only)
     with open(os.path.join(config.output_dir, "identifiers.json"), "w") as f:
         json.dump(["<blank>"], f)
 

@@ -109,14 +109,11 @@ class Dataset:
 
     def _collate_batch(self, batch: Dict[str, np.ndarray]) -> Dict[str, jnp.ndarray]:
         """Convert batch to JAX arrays and handle padding."""
-        # Convert dtype
         batch = {k: v.astype(np.int32) for k, v in batch.items()}
 
-        # Convert ignore label IDs
         if self.metadata.ignore_label_id is not None:
             batch["labels"][batch["labels"] == self.metadata.ignore_label_id] = -100
 
-        # Pad if needed
         if batch["puzzle_identifiers"].size < self.global_batch_size:
             pad_size = self.global_batch_size - batch["puzzle_identifiers"].size
             pad_values = {
@@ -133,7 +130,6 @@ class Dataset:
                 for k, v in batch.items()
             }
 
-        # Convert to JAX arrays
         return {k: jnp.array(v) for k, v in batch.items()}
 
     def __iter__(self) -> Iterator[Tuple[str, Dict[str, jnp.ndarray], int]]:
@@ -153,7 +149,6 @@ class Dataset:
             while start_index < total_examples:
                 end_index = min(total_examples, start_index + self.global_batch_size)
 
-                # Get puzzle indices
                 puzzle_indices = []
                 puzzle_index = (
                     np.searchsorted(
@@ -189,7 +184,6 @@ class Dataset:
             self._iters += 1
             rng = np.random.Generator(np.random.Philox(seed=self.seed + self._iters))
 
-            # Keep sampling until we can't make a full batch
             while True:
                 batch_indices, batch_puzzle_indices = self._sample_batch(rng, dataset)
 

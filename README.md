@@ -7,7 +7,6 @@ Jax implementation of [Hierarchical Reasoning Model](https://arxiv.org/abs/2506.
 ```sh
 pip install -e .
 
-python build_dataset.py --output-dir data/sudoku-extreme-1k-aug-1000  --subsample-size 1000 --num-aug 1000
-
+python build_dataset.py 
 python main.py
 ```

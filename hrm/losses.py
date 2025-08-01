@@ -9,53 +9,11 @@ from hrm.model import ACTModel, Carry
 IGNORE_LABEL_ID = -100
 
 
-def s(x: jnp.ndarray, epsilon: float = 1e-30) -> jnp.ndarray:
-    return jnp.where(x < 0, 1 / (1 - x + epsilon), x + 1)
-
-
-def log_stablemax(x: jnp.ndarray, axis: int = -1) -> jnp.ndarray:
-    s_x = s(x)
-    return jnp.log(s_x / jnp.sum(s_x, axis=axis, keepdims=True))
-
-
-def stablemax_cross_entropy(
-    logits: jnp.ndarray, labels: jnp.ndarray, ignore_index: int = -100
-) -> jnp.ndarray:
-    logprobs = log_stablemax(logits, axis=-1)
-    valid_mask = labels != ignore_index
-    transformed_labels = jnp.where(valid_mask, labels, 0)
-    prediction_logprobs = jnp.take_along_axis(
-        logprobs, transformed_labels[..., None], axis=-1
-    ).squeeze(-1)
-    return -jnp.where(valid_mask, prediction_logprobs, 0)
-
-
-def softmax_cross_entropy(
-    logits: jnp.ndarray, labels: jnp.ndarray, ignore_index: int = -100
-) -> jnp.ndarray:
-    valid_mask = labels != ignore_index
-    log_probs = jax.nn.log_softmax(logits, axis=-1)
-    transformed_labels = jnp.where(valid_mask, labels, 0)
-    prediction_logprobs = jnp.take_along_axis(
-        log_probs, transformed_labels[..., None], axis=-1
-    ).squeeze(-1)
-    return -jnp.where(valid_mask, prediction_logprobs, 0)
-
-
-@dataclass
-class LossOutput:
+class LossOutput(eqx.Module):
     loss: jnp.ndarray
     metrics: Dict[str, jnp.ndarray]
     outputs: Dict[str, jnp.ndarray]
     all_halted: jnp.ndarray
-
-
-def binary_cross_entropy_with_logits(
-    logits: jnp.ndarray, labels: jnp.ndarray
-) -> jnp.ndarray:
-    return -(
-        labels * jax.nn.log_sigmoid(logits) + (1 - labels) * jax.nn.log_sigmoid(-logits)
-    )
 
 
 class ACTLossHead(eqx.Module):
@@ -126,3 +84,44 @@ class ACTLossHead(eqx.Module):
             all_halted=new_carry.halted.all(),
         )
         return new_carry, loss_output
+
+
+def s(x: jnp.ndarray, epsilon: float = 1e-30) -> jnp.ndarray:
+    return jnp.where(x < 0, 1 / (1 - x + epsilon), x + 1)
+
+
+def log_stablemax(x: jnp.ndarray, axis: int = -1) -> jnp.ndarray:
+    s_x = s(x)
+    return jnp.log(s_x / jnp.sum(s_x, axis=axis, keepdims=True))
+
+
+def stablemax_cross_entropy(
+    logits: jnp.ndarray, labels: jnp.ndarray, ignore_index: int = -100
+) -> jnp.ndarray:
+    logprobs = log_stablemax(logits, axis=-1)
+    valid_mask = labels != ignore_index
+    transformed_labels = jnp.where(valid_mask, labels, 0)
+    prediction_logprobs = jnp.take_along_axis(
+        logprobs, transformed_labels[..., None], axis=-1
+    ).squeeze(-1)
+    return -jnp.where(valid_mask, prediction_logprobs, 0)
+
+
+def softmax_cross_entropy(
+    logits: jnp.ndarray, labels: jnp.ndarray, ignore_index: int = -100
+) -> jnp.ndarray:
+    valid_mask = labels != ignore_index
+    log_probs = jax.nn.log_softmax(logits, axis=-1)
+    transformed_labels = jnp.where(valid_mask, labels, 0)
+    prediction_logprobs = jnp.take_along_axis(
+        log_probs, transformed_labels[..., None], axis=-1
+    ).squeeze(-1)
+    return -jnp.where(valid_mask, prediction_logprobs, 0)
+
+
+def binary_cross_entropy_with_logits(
+    logits: jnp.ndarray, labels: jnp.ndarray
+) -> jnp.ndarray:
+    return -(
+        labels * jax.nn.log_sigmoid(logits) + (1 - labels) * jax.nn.log_sigmoid(-logits)
+    )

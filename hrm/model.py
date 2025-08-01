@@ -10,8 +10,8 @@ from hrm.layers import Attention, RotaryEmbedding, SwiGLU, rms_norm
 
 
 class InnerCarry(eqx.Module):
-    z_H: jnp.ndarray
-    z_L: jnp.ndarray
+    zh: jnp.ndarray
+    zl: jnp.ndarray
 
 
 class Carry(eqx.Module):
@@ -85,8 +85,8 @@ class ACTModel(eqx.Module):
     lm_head: eqx.nn.Linear
     q_head: eqx.nn.Linear
 
-    H_level: ReasoningModule
-    L_level: ReasoningModule
+    h_layers: ReasoningModule
+    l_layers: ReasoningModule
 
     H_init: jnp.ndarray
     L_init: jnp.ndarray
@@ -148,13 +148,13 @@ class ACTModel(eqx.Module):
 
         h_keys = jax.random.split(keys[5], cfg.H_layers)
         l_keys = jax.random.split(keys[6], cfg.L_layers)
-        self.H_level = ReasoningModule(
+        self.h_layers = ReasoningModule(
             [
                 Block(hidden_size, num_heads, cfg.expansion, cfg.rms_norm_eps, key=k)
                 for k in h_keys
             ]
         )
-        self.L_level = ReasoningModule(
+        self.l_layers = ReasoningModule(
             [
                 Block(hidden_size, num_heads, cfg.expansion, cfg.rms_norm_eps, key=k)
                 for k in l_keys
@@ -191,8 +191,8 @@ class ACTModel(eqx.Module):
         carry: InnerCarry,
     ) -> InnerCarry:
         return InnerCarry(
-            z_H=jnp.where(flag[:, None, None], self.H_init, carry.z_H),
-            z_L=jnp.where(flag[:, None, None], self.L_init, carry.z_L),
+            zh=jnp.where(flag[:, None, None], self.H_init, carry.zh),
+            zl=jnp.where(flag[:, None, None], self.L_init, carry.zl),
         )
 
     def forward_inner(
@@ -200,21 +200,21 @@ class ACTModel(eqx.Module):
         carry: InnerCarry,
         data: Dict[str, jnp.ndarray],
     ) -> Tuple[InnerCarry, jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
-        cos_sin = self.rotary_emb() 
+        cos_sin = self.rotary_emb()
         inp = self._input_embeddings(data["inputs"], data["puzzle_identifiers"])
-        zh, zl = carry.z_H, carry.z_L
+        zh, zl = carry.zh, carry.zl
         for h in range(self.H_cycles):
             for l in range(self.L_cycles):
                 if not (h == self.H_cycles - 1 and l == self.L_cycles - 1):
-                    zl = jax.lax.stop_gradient(self.L_level(zl, zh + inp, cos_sin))
+                    zl = jax.lax.stop_gradient(self.l_layers(zl, zh + inp, cos_sin))
             if h < self.H_cycles - 1:
-                zh = jax.lax.stop_gradient(self.H_level(zh, zl, cos_sin))
+                zh = jax.lax.stop_gradient(self.h_layers(zh, zl, cos_sin))
 
-        zl = self.L_level(zl, zh + inp, cos_sin)
-        zh = self.H_level(zh, zl, cos_sin)
+        zl = self.l_layers(zl, zh + inp, cos_sin)
+        zh = self.h_layers(zh, zl, cos_sin)
         new_inner = InnerCarry(
-            jax.lax.stop_gradient(zh),
-            jax.lax.stop_gradient(zl),
+            zh=jax.lax.stop_gradient(zh),
+            zl=jax.lax.stop_gradient(zl),
         )
 
         out = jax.vmap(jax.vmap(self.lm_head))(zh[:, self.puzzle_emb_len :])
