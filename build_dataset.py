@@ -30,45 +30,32 @@ class DataProcessConfig(BaseModel):
     output_dir: str = "data/sudoku-extreme-1k-aug-1000"
 
     num_aug: int = 1000
-    subsample_size: Optional[int] = 1000
+    subsample_size: int = 1000
     min_difficulty: Optional[int] = None
 
 
 def shuffle_sudoku(board: np.ndarray, solution: np.ndarray):
-    # Create a random digit mapping: a permutation of 1..9, with zero (blank) unchanged
     digit_map = np.pad(np.random.permutation(np.arange(1, 10)), (1, 0))
-
-    # Randomly decide whether to transpose.
     transpose_flag = np.random.rand() < 0.5
 
-    # Generate a valid row permutation:
-    # - Shuffle the 3 bands (each band = 3 rows) and for each band, shuffle its 3 rows.
     bands = np.random.permutation(3)
     row_perm = np.concatenate([b * 3 + np.random.permutation(3) for b in bands])
 
-    # Similarly for columns (stacks).
     stacks = np.random.permutation(3)
     col_perm = np.concatenate([s * 3 + np.random.permutation(3) for s in stacks])
 
-    # Build an 81->81 mapping. For each new cell at (i, j)
-    # (row index = i // 9, col index = i % 9),
-    # its value comes from old row = row_perm[i//9] and old col = col_perm[i%9].
     mapping = np.array([row_perm[i // 9] * 9 + col_perm[i % 9] for i in range(81)])
 
     def apply_transformation(x: np.ndarray) -> np.ndarray:
-        # Apply transpose flag
         if transpose_flag:
             x = x.T
-        # Apply the position mapping.
         new_board = x.flatten()[mapping].reshape(9, 9).copy()
-        # Apply digit mapping
         return digit_map[new_board]
 
     return apply_transformation(board), apply_transformation(solution)
 
 
 def convert_subset(set_name: str, config: DataProcessConfig):
-    # Read CSV
     inputs = []
     labels = []
 
@@ -94,8 +81,6 @@ def convert_subset(set_name: str, config: DataProcessConfig):
                     np.frombuffer(a.encode(), dtype=np.uint8).reshape(9, 9) - ord("0")
                 )
 
-    # If subsample_size is specified for the training set,
-    # randomly sample the desired number of examples.
     if set_name == "train" and config.subsample_size is not None:
         total_samples = len(inputs)
         if config.subsample_size < total_samples:
@@ -105,7 +90,6 @@ def convert_subset(set_name: str, config: DataProcessConfig):
             inputs = [inputs[i] for i in indices]
             labels = [labels[i] for i in indices]
 
-    # Generate dataset
     num_augments = config.num_aug if set_name == "train" else 0
 
     results = {
@@ -126,13 +110,11 @@ def convert_subset(set_name: str, config: DataProcessConfig):
 
     for orig_inp, orig_out in zip(tqdm(inputs), labels):
         for aug_idx in range(1 + num_augments):
-            # First index is not augmented
             if aug_idx == 0:
                 inp, out = orig_inp, orig_out
             else:
                 inp, out = shuffle_sudoku(orig_inp, orig_out)
 
-            # Push puzzle (only single example)
             results["inputs"].append(inp)
             results["labels"].append(out)
             example_id += 1
@@ -141,10 +123,8 @@ def convert_subset(set_name: str, config: DataProcessConfig):
             results["puzzle_indices"].append(example_id)
             results["puzzle_identifiers"].append(0)
 
-        # Push group
         results["group_indices"].append(puzzle_id)
 
-    # To Numpy
     def _seq_to_numpy(seq):
         arr = np.concatenate(seq).reshape(len(seq), -1)
 
