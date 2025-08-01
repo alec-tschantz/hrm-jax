@@ -48,7 +48,7 @@ def act_loss_fn(
     }
 
     lm_loss = (
-        stablemax_cross_entropy(
+        softmax_cross_entropy(
             outputs["logits"], labels, ignore_index=IGNORE_LABEL_ID
         )
         / loss_divisor
