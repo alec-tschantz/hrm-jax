@@ -11,7 +11,7 @@ import tyro
 from tqdm import tqdm
 import wandb
 
-from hrm import Dataset, ACTModel, ACTLossHead, Carry, LossOutput
+from hrm import Dataset, ACTModel, Carry, act_loss_fn
 
 
 @dataclass
@@ -38,7 +38,6 @@ class TrainConfig:
     pos_encodings: str = "rope"
     halt_max_steps: int = 16
     halt_exploration_prob: float = 0.1
-    loss_type: str = "softmax_cross_entropy"
     rms_norm_eps: float = 1e-5
     rope_theta: float = 10000.0
     checkpoint_path: Optional[str] = None
@@ -53,7 +52,7 @@ class TrainState(eqx.Module):
     model: eqx.Module
     opt_state: optax.OptState
     carry: Optional[Carry]
-    step: int
+    step: jnp.ndarray
     key: jax.random.PRNGKey
 
 
@@ -75,10 +74,9 @@ def create_train_state(config: TrainConfig, key: jax.random.PRNGKey, total_steps
         ),
     )
     model_key, key = jax.random.split(key)
-    core_model = ACTModel(config, key=model_key)
-    model = ACTLossHead(core_model, loss_type=config.loss_type)
+    model = ACTModel(config, key=model_key)
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
-    return TrainState(model, opt_state, None, 0, key), optimizer, lr_schedule
+    return TrainState(model, opt_state, None, jnp.array(0, jnp.int32), key), optimizer, lr_schedule
 
 
 @eqx.filter_jit
@@ -87,7 +85,7 @@ def train_step(state: TrainState, batch, optimizer):
     step_key, next_key = jax.random.split(state.key)
 
     def loss_fn(model, carry, batch, key):
-        new_carry, loss_output = model(carry, batch, key=key, is_training=True)
+        new_carry, loss_output = act_loss_fn(model, carry, batch, key)
         return loss_output.loss / batch["inputs"].shape[0], (new_carry, loss_output)
 
     (loss, (new_carry, loss_output)), grads = eqx.filter_value_and_grad(

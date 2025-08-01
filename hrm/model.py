@@ -203,15 +203,21 @@ class ACTModel(eqx.Module):
         cos_sin = self.rotary_emb()
         inp = self._input_embeddings(data["inputs"], data["puzzle_identifiers"])
         zh, zl = carry.zh, carry.zl
-        for h in range(self.H_cycles):
-            for l in range(self.L_cycles):
-                if not (h == self.H_cycles - 1 and l == self.L_cycles - 1):
-                    zl = jax.lax.stop_gradient(self.l_layers(zl, zh + inp, cos_sin))
-            if h < self.H_cycles - 1:
-                zh = jax.lax.stop_gradient(self.h_layers(zh, zl, cos_sin))
 
+        # Run all but final H-cycle
+        for _ in range(self.H_cycles - 1):
+            for _ in range(self.L_cycles):
+                zl = jax.lax.stop_gradient(self.l_layers(zl, zh + inp, cos_sin))
+            zh = jax.lax.stop_gradient(self.h_layers(zh, zl, cos_sin))
+
+        # Run final H-cycle: run all but the last L-step
+        for _ in range(self.L_cycles - 1):
+            zl = jax.lax.stop_gradient(self.l_layers(zl, zh + inp, cos_sin))
+
+        # Final L-step + then the final H-step
         zl = self.l_layers(zl, zh + inp, cos_sin)
         zh = self.h_layers(zh, zl, cos_sin)
+
         new_inner = InnerCarry(
             zh=jax.lax.stop_gradient(zh),
             zl=jax.lax.stop_gradient(zl),
@@ -228,6 +234,8 @@ class ACTModel(eqx.Module):
         key: Optional[jax.random.PRNGKey] = None,
         is_training: bool = False,
     ) -> Tuple[Carry, Dict[str, jnp.ndarray]]:
+
+        # Apply halting to carry - only update to new batch if halt is True
         inner = self.reset_carry(carry.halted, carry.inner_carry)
         steps = jnp.where(carry.halted, 0, carry.steps)
         inputs = jnp.where(
@@ -243,11 +251,14 @@ class ACTModel(eqx.Module):
         )
         data = {"inputs": inputs, "puzzle_identifiers": pids, "labels": labels}
 
+        # Run model forward
         inner, logits, (q_h, q_c) = self.forward_inner(inner, data)
         outputs = {"logits": logits, "q_halt_logits": q_h, "q_continue_logits": q_c}
         steps = steps + 1
         last = steps >= self.halt_max_steps
         halted = last
+
+        # Estimate continue Q
         if is_training and self.halt_max_steps > 1:
             halted |= q_h > q_c
             if key is not None:
