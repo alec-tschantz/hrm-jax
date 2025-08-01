@@ -266,11 +266,7 @@ class ACTModel(eqx.Module):
                 explore = (
                     jax.random.uniform(e_key, q_h.shape) < self.halt_exploration_prob
                 )
-                min_step = jnp.where(
-                    explore,
-                    jax.random.randint(h_key, steps.shape, 2, self.halt_max_steps + 1),
-                    self.halt_max_steps,
-                )
+                min_step = jnp.where(explore, jax.random.randint(h_key, steps.shape, 2, self.halt_max_steps + 1), 0)
                 halted &= steps >= min_step
             nxt_inner, _, (n_q_h, n_q_c) = self.forward_inner(inner, data)
             next_q = jnp.where(last, n_q_h, jnp.maximum(n_q_h, n_q_c))
