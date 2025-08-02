@@ -103,7 +103,6 @@ def train_step(
         state.model, carry, batch, step_key
     )
 
-    grads = jax.tree.map(lambda g: g / batch["inputs"].shape[0], grads)
     updates, new_opt_state = optim.update(
         grads, state.opt_state, eqx.filter(state.model, eqx.is_array)
     )

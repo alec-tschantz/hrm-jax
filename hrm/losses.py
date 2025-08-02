@@ -10,72 +10,86 @@ IGNORE_LABEL_ID = -100
 class LossOutput(eqx.Module):
     loss: jnp.ndarray
     metrics: Dict[str, jnp.ndarray]
-    outputs: Dict[str, jnp.ndarray]
     all_halted: jnp.ndarray
 
 
 def act_loss_fn(
-    model,
-    carry,
+    model: eqx.Module,
+    carry: Any,
     batch: Dict[str, jnp.ndarray],
     key: Optional[jax.random.PRNGKey] = None,
     is_training: bool = True,
-) -> (Any, LossOutput):
+):
     new_carry, outputs = model(carry, batch, key=key, is_training=is_training)
 
     labels = new_carry.data["labels"]
-    mask = labels != IGNORE_LABEL_ID
-    loss_counts = mask.sum(-1)
-    loss_divisor = jnp.maximum(loss_counts, 1)[..., None]
+    mask = labels != IGNORE_LABEL_ID  # [B,L]
+    n_tok = mask.sum(-1)  # [B]
+    valid = new_carry.halted & (n_tok > 0)  # [B]
+    vf = valid.astype(jnp.float32)  # [B]
 
-    pred = jnp.argmax(outputs["logits"], axis=-1)
-    is_correct = mask & (pred == labels)
-    seq_is_correct = is_correct.sum(-1) == loss_counts
-    valid_metrics = new_carry.halted & (loss_counts > 0)
+    preds = jnp.argmax(outputs["logits"], axis=-1)
+    tok_correct = (preds == labels) & mask  # [B,L]
+    seq_correct = tok_correct.sum(-1) == n_tok  # [B]
 
-    metrics = {
-        "count": valid_metrics.sum(),
-        "accuracy": jnp.where(
-            valid_metrics,
-            (is_correct.astype(jnp.float32) / loss_divisor).sum(-1),
-            0,
-        ).sum(),
-        "exact_accuracy": (valid_metrics & seq_is_correct).sum(),
-        "q_halt_accuracy": (
-            valid_metrics & ((outputs["q_halt_logits"] >= 0) == seq_is_correct)
-        ).sum(),
-        "steps": jnp.where(valid_metrics, new_carry.steps, 0).sum(),
-    }
+    # ---------------------------------------------------------------- losses
+    denom = jnp.maximum(n_tok, 1)[..., None]  # [B,1]
+    lm_loss = (softmax_cross_entropy(outputs["logits"], labels) / denom).mean()
 
-    lm_loss = (
-        softmax_cross_entropy(outputs["logits"], labels, ignore_index=IGNORE_LABEL_ID)
-        / loss_divisor
-    ).sum()
+    q_halt_loss = bce_with_logits(
+        outputs["q_halt_logits"].astype(jnp.float32),
+        seq_correct.astype(jnp.float32),
+    ).mean()
 
-    qh = outputs["q_halt_logits"].astype(jnp.float32)
-    q_halt_loss = binary_cross_entropy_with_logits(
-        qh, seq_is_correct.astype(jnp.float32)
-    ).sum()
-
-    q_continue_loss = 0.0
+    q_cont_loss = jnp.array(0.0, dtype=jnp.float32)
     if "target_q_continue" in outputs:
-        qc = outputs["q_continue_logits"].astype(jnp.float32)
-        tc = outputs["target_q_continue"].astype(jnp.float32)
-        q_continue_loss = binary_cross_entropy_with_logits(qc, tc).sum()
-        metrics["q_continue_loss"] = q_continue_loss
+        q_cont_loss = bce_with_logits(
+            outputs["q_continue_logits"].astype(jnp.float32),
+            outputs["target_q_continue"].astype(jnp.float32),
+        ).mean()
 
-    metrics["lm_loss"] = lm_loss
-    metrics["q_halt_loss"] = q_halt_loss
+    total_loss = lm_loss + 0.5 * (q_halt_loss + q_cont_loss)
 
-    total_loss = lm_loss + 0.5 * (q_halt_loss + q_continue_loss)
-    return (
-        new_carry,
-        LossOutput(
-            loss=total_loss,
-            metrics=metrics,
-            outputs=metrics,
-            all_halted=new_carry.halted.all(),
-        ),
+    # ---------------------------------------------------------------- metrics (masked)
+    valid_sum = vf.sum()  
+    safe_inv = jnp.where(valid_sum > 0, 1.0 / valid_sum, jnp.nan)
+
+    # token accuracy = (# correct tokens) / (# valid tokens)
+    tok_corr_sum = (tok_correct.astype(jnp.float32) * vf[:, None]).sum()
+    tok_total_sum = (mask.astype(jnp.float32) * vf[:, None]).sum()
+    mean_tok_acc = jnp.where(tok_total_sum > 0, tok_corr_sum / tok_total_sum, jnp.nan)
+
+    mean_seq_acc = (seq_correct.astype(jnp.float32) * vf).sum() * safe_inv
+
+    q_halt_pred = outputs["q_halt_logits"] >= 0
+    q_halt_acc = (
+        (q_halt_pred == seq_correct).astype(jnp.float32) * vf
+    ).sum() * safe_inv
+
+    mean_steps = (new_carry.steps.astype(jnp.float32) * vf).sum() * safe_inv
+
+    metrics = dict(
+        count=valid_sum,
+        accuracy=mean_tok_acc,
+        exact_accuracy=mean_seq_acc,
+        q_halt_accuracy=q_halt_acc,
+        steps=mean_steps,
+        lm_loss=lm_loss,
+        q_halt_loss=q_halt_loss,
+        q_continue_loss=q_cont_loss,
+    )
+
+    return new_carry, LossOutput(
+        loss=total_loss,
+        metrics=metrics,
+        all_halted=new_carry.halted.all(),
+    )
+
+
+def bce_with_logits(logits: jnp.ndarray, targets: jnp.ndarray) -> jnp.ndarray:
+    return -(
+        targets * jax.nn.log_sigmoid(logits)
+        + (1.0 - targets) * jax.nn.log_sigmoid(-logits)
     )
 
 
@@ -103,18 +117,10 @@ def stablemax_cross_entropy(
     return -jnp.where(valid_mask, pred_logp, 0)
 
 
-def binary_cross_entropy_with_logits(
-    logits: jnp.ndarray, labels: jnp.ndarray
-) -> jnp.ndarray:
-    return -(
-        labels * jax.nn.log_sigmoid(logits) + (1 - labels) * jax.nn.log_sigmoid(-logits)
-    )
+def log_stablemax(x: jnp.ndarray, axis: int = -1) -> jnp.ndarray:
+    s_x = s(x)
+    return jnp.log(s_x / jnp.sum(s_x, axis=axis, keepdims=True))
 
 
 def s(x: jnp.ndarray, epsilon: float = 1e-30) -> jnp.ndarray:
     return jnp.where(x < 0, 1 / (1 - x + epsilon), x + 1)
-
-
-def log_stablemax(x: jnp.ndarray, axis: int = -1) -> jnp.ndarray:
-    s_x = s(x)
-    return jnp.log(s_x / jnp.sum(s_x, axis=axis, keepdims=True))
