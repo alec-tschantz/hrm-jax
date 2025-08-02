@@ -23,16 +23,16 @@ def act_loss_fn(
     new_carry, outputs = model(carry, batch, key=key, is_training=is_training)
 
     labels = new_carry.data["labels"]
-    mask = labels != IGNORE_LABEL_ID  # [B,L]
-    n_tok = mask.sum(-1)  # [B]
-    valid = new_carry.halted & (n_tok > 0)  # [B]
-    vf = valid.astype(jnp.float32)  # [B]
+    mask = labels != IGNORE_LABEL_ID
+    n_tok = mask.sum(-1)
+    valid = new_carry.halted & (n_tok > 0)
+    vf = valid.astype(jnp.float32)
 
     preds = jnp.argmax(outputs["logits"], axis=-1)
-    tok_correct = (preds == labels) & mask  # [B,L]
-    seq_correct = tok_correct.sum(-1) == n_tok  # [B]
+    tok_correct = (preds == labels) & mask
+    seq_correct = tok_correct.sum(-1) == n_tok
 
-    # ---------------------------------------------------------------- losses
+    # losses ----------------------------------------------------------------
     denom = jnp.maximum(n_tok, 1)[..., None]  # [B,1]
     lm_loss = (softmax_cross_entropy(outputs["logits"], labels) / denom).mean()
 
@@ -50,11 +50,10 @@ def act_loss_fn(
 
     total_loss = lm_loss + 0.5 * (q_halt_loss + q_cont_loss)
 
-    # ---------------------------------------------------------------- metrics (masked)
-    valid_sum = vf.sum()  
+    # metrics ----------------------------------------------------------------
+    valid_sum = vf.sum()
     safe_inv = jnp.where(valid_sum > 0, 1.0 / valid_sum, jnp.nan)
 
-    # token accuracy = (# correct tokens) / (# valid tokens)
     tok_corr_sum = (tok_correct.astype(jnp.float32) * vf[:, None]).sum()
     tok_total_sum = (mask.astype(jnp.float32) * vf[:, None]).sum()
     mean_tok_acc = jnp.where(tok_total_sum > 0, tok_corr_sum / tok_total_sum, jnp.nan)
