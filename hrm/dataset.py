@@ -140,6 +140,17 @@ class Dataset:
         else:
             yield from self._iter_train()
 
+    def __len__(self) -> int:
+        self._lazy_load_dataset()
+        total = 0
+        for ds in self._data.values():
+            n = len(ds["inputs"])
+            if self.test_set_mode:
+                total += math.ceil(n / self.global_batch_size)
+            else:
+                total += n // self.global_batch_size
+        return total
+
     def _iter_test(self):
         """Iterate through test data sequentially."""
         for set_name, dataset in self._data.items():

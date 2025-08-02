@@ -26,7 +26,6 @@ def apply_rotary_pos_emb(
 
 
 class RotaryEmbedding(eqx.Module):
-    # TODO
     cos_cached: jnp.ndarray = eqx.static_field()
     sin_cached: jnp.ndarray =  eqx.static_field()
 

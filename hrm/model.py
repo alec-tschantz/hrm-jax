@@ -18,7 +18,7 @@ class Carry(eqx.Module):
     inner_carry: InnerCarry
     steps: jnp.ndarray
     halted: jnp.ndarray
-    current_data: Dict[str, jnp.ndarray]
+    data: Dict[str, jnp.ndarray]
 
 
 class Block(eqx.Module):
@@ -47,12 +47,12 @@ class Block(eqx.Module):
         self.mlp = SwiGLU(hidden_size=hidden_size, expansion=expansion, key=mlp_key)
         self.norm_eps = norm_eps
 
-    def __call__(self, hidden_states: jnp.ndarray, cos_sin=None) -> jnp.ndarray:
-        hidden_states = hidden_states + self.self_attn(hidden_states, cos_sin)
-        hidden_states = rms_norm(hidden_states, self.norm_eps)
-        hidden_states = hidden_states + self.mlp(hidden_states)
-        hidden_states = rms_norm(hidden_states, self.norm_eps)
-        return hidden_states
+    def __call__(self, h: jnp.ndarray, cos_sin=None) -> jnp.ndarray:
+        h = h + self.self_attn(h, cos_sin)
+        h = rms_norm(h, self.norm_eps)
+        h = h + self.mlp(h)
+        h = rms_norm(h, self.norm_eps)
+        return h
 
 
 class ReasoningModule(eqx.Module):
@@ -63,14 +63,14 @@ class ReasoningModule(eqx.Module):
 
     def __call__(
         self,
-        hidden_states: jnp.ndarray,
+        h: jnp.ndarray,
         injection: jnp.ndarray,
         cos_sin=None,
     ) -> jnp.ndarray:
-        hidden_states = hidden_states + injection
+        h = h + injection
         for layer in self.layers:
-            hidden_states = layer(hidden_states, cos_sin)
-        return hidden_states
+            h = layer(h, cos_sin)
+        return h
 
 
 class ACTModel(eqx.Module):
@@ -88,11 +88,10 @@ class ACTModel(eqx.Module):
     h_layers: ReasoningModule
     l_layers: ReasoningModule
 
-    H_init: jnp.ndarray
-    L_init: jnp.ndarray
+    reset_key: jax.random.PRNGKey
 
-    H_cycles: int
-    L_cycles: int
+    h_cycles: int
+    l_cycles: int
 
     halt_max_steps: int
     halt_exploration_prob: float
@@ -107,8 +106,8 @@ class ACTModel(eqx.Module):
         self.embed_scale = math.sqrt(hidden_size)
         self.hidden_size = hidden_size
         self.seq_len = seq_len
-        self.H_cycles = cfg.H_cycles
-        self.L_cycles = cfg.L_cycles
+        self.h_cycles = cfg.h_cycles
+        self.l_cycles = cfg.l_cycles
         self.halt_max_steps = cfg.halt_max_steps
         self.halt_exploration_prob = cfg.halt_exploration_prob
 
@@ -121,6 +120,12 @@ class ACTModel(eqx.Module):
         self.puzzle_emb = eqx.nn.Embedding(
             cfg.num_puzzle_identifiers, hidden_size, key=keys[1]
         )
+        self.puzzle_emb = eqx.tree_at(
+            lambda m: m.weight,
+            self.puzzle_emb,
+            jnp.zeros((cfg.num_puzzle_identifiers, hidden_size)),
+        )
+
         self.rotary_emb = RotaryEmbedding(
             dim=hidden_size // num_heads,
             max_position_embeddings=seq_len + self.puzzle_emb_len,
@@ -141,13 +146,18 @@ class ACTModel(eqx.Module):
             key=keys[4],
         )
         self.q_head = eqx.tree_at(
+            lambda m: m.weight,
+            self.q_head,
+            jnp.zeros((2, hidden_size)),
+        )
+        self.q_head = eqx.tree_at(
             lambda m: m.bias,
             self.q_head,
             jnp.full((2,), -5.0),
         )
 
-        h_keys = jax.random.split(keys[5], cfg.H_layers)
-        l_keys = jax.random.split(keys[6], cfg.L_layers)
+        h_keys = jax.random.split(keys[5], cfg.h_layers)
+        l_keys = jax.random.split(keys[6], cfg.l_layers)
         self.h_layers = ReasoningModule(
             [
                 Block(hidden_size, num_heads, cfg.expansion, cfg.rms_norm_eps, key=k)
@@ -161,16 +171,7 @@ class ACTModel(eqx.Module):
             ]
         )
 
-        self.H_init = jax.random.normal(keys[7], (hidden_size,))
-        self.L_init = jax.random.normal(keys[8], (hidden_size,))
-
-    def _input_embeddings(
-        self, inputs: jnp.ndarray, puzzle_ids: jnp.ndarray
-    ) -> jnp.ndarray:
-        emb = jax.vmap(jax.vmap(self.embed_tokens))(inputs)
-        p_emb = jax.vmap(self.puzzle_emb)(puzzle_ids)
-        emb = jnp.concatenate([p_emb[:, None, :], emb], axis=1)
-        return self.embed_scale * emb
+        self.reset_key = keys[7]
 
     def initial_carry(
         self,
@@ -182,39 +183,50 @@ class ACTModel(eqx.Module):
             inner_carry=InnerCarry(jnp.empty(shape), jnp.empty(shape)),
             steps=jnp.zeros((bsz,), dtype=jnp.int32),
             halted=jnp.ones((bsz,), dtype=jnp.bool_),
-            current_data={k: jnp.empty_like(v) for k, v in batch.items()},
+            data={k: jnp.empty_like(v) for k, v in batch.items()},
         )
 
-    def reset_carry(
+    def _reset_inner(
         self,
         flag: jnp.ndarray,
         carry: InnerCarry,
     ) -> InnerCarry:
+        h_key, l_key = jax.random.split(self.reset_key)
+        h_init = jax.random.normal(h_key, (self.hidden_size,))
+        l_init = jax.random.normal(l_key, (self.hidden_size,))
+
         return InnerCarry(
-            zh=jnp.where(flag[:, None, None], self.H_init, carry.zh),
-            zl=jnp.where(flag[:, None, None], self.L_init, carry.zl),
+            zh=jnp.where(flag[:, None, None], h_init, carry.zh),
+            zl=jnp.where(flag[:, None, None], l_init, carry.zl),
         )
 
-    def forward_inner(
+    def _embed_inputs(
+        self, inputs: jnp.ndarray, puzzle_identifiers: jnp.ndarray
+    ) -> jnp.ndarray:
+        emb = jax.vmap(jax.vmap(self.embed_tokens))(inputs)
+        p_emb = jax.vmap(self.puzzle_emb)(puzzle_identifiers)
+        emb = jnp.concatenate([p_emb[:, None, :], emb], axis=1)
+        return self.embed_scale * emb
+
+    def _forward_inner(
         self,
         carry: InnerCarry,
         data: Dict[str, jnp.ndarray],
     ) -> Tuple[InnerCarry, jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
         cos_sin = self.rotary_emb()
-        inp = self._input_embeddings(data["inputs"], data["puzzle_identifiers"])
+        inp = self._embed_inputs(data["inputs"], data["puzzle_identifiers"])
         zh, zl = carry.zh, carry.zl
 
-        # Run all but final H-cycle
-        for _ in range(self.H_cycles - 1):
-            for _ in range(self.L_cycles):
-                zl = jax.lax.stop_gradient(self.l_layers(zl, zh + inp, cos_sin))
-            zh = jax.lax.stop_gradient(self.h_layers(zh, zl, cos_sin))
+        for h_step in range(self.h_cycles):
+            for l_step in range(self.l_cycles):
+                if not (
+                    (h_step == self.h_cycles - 1) and (l_step == self.l_cycles - 1)
+                ):
+                    zl = jax.lax.stop_gradient(self.l_layers(zl, zh + inp, cos_sin))
 
-        # Run final H-cycle: run all but the last L-step
-        for _ in range(self.L_cycles - 1):
-            zl = jax.lax.stop_gradient(self.l_layers(zl, zh + inp, cos_sin))
+            if not (h_step == self.h_cycles - 1):
+                zh = jax.lax.stop_gradient(self.h_layers(zh, zl, cos_sin))
 
-        # Final L-step + then the final H-step
         zl = self.l_layers(zl, zh + inp, cos_sin)
         zh = self.h_layers(zh, zl, cos_sin)
 
@@ -227,6 +239,58 @@ class ACTModel(eqx.Module):
         q = jax.vmap(self.q_head)(zh[:, 0])
         return new_inner, out, (q[:, 0], q[:, 1])
 
+    def _filter_halting(
+        self,
+        carry: Carry,
+        batch: Dict[str, jnp.ndarray],
+    ) -> Tuple[InnerCarry, jnp.ndarray, Dict[str, jnp.ndarray]]:
+        inner = self._reset_inner(carry.halted, carry.inner_carry)
+        steps = jnp.where(carry.halted, 0, carry.steps)
+
+        data = {
+            "inputs": jnp.where(
+                carry.halted[:, None], batch["inputs"], carry.data["inputs"]
+            ),
+            "labels": jnp.where(
+                carry.halted[:, None], batch["labels"], carry.data["labels"]
+            ),
+            "puzzle_identifiers": jnp.where(
+                carry.halted,
+                batch["puzzle_identifiers"],
+                carry.data["puzzle_identifiers"],
+            ),
+        }
+
+        return inner, steps, data
+
+    def _halt_logic(
+        self,
+        inner: InnerCarry,
+        data: Dict[str, jnp.ndarray],
+        steps: jnp.ndarray,
+        q_h: jnp.ndarray,
+        q_c: jnp.ndarray,
+        key: Optional[jax.random.PRNGKey],
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        is_last_step = steps >= self.halt_max_steps
+        halted = is_last_step | (q_h > q_c)
+
+        if key is not None:
+            e_key, h_key = jax.random.split(key)
+            explore = jax.random.uniform(e_key, q_h.shape) < self.halt_exploration_prob
+            min_halt_steps = jnp.where(
+                explore,
+                jax.random.randint(h_key, steps.shape, 2, self.halt_max_steps + 1),
+                0,
+            )
+            halted = halted & (steps >= min_halt_steps)
+
+        _, _, (next_q_h, next_q_c) = self._forward_inner(inner, data)
+        next_q = jnp.where(is_last_step, next_q_h, jnp.maximum(next_q_h, next_q_c))
+        target_q_continue = jax.nn.sigmoid(next_q)
+
+        return halted, target_q_continue
+
     def __call__(
         self,
         carry: Carry,
@@ -234,41 +298,18 @@ class ACTModel(eqx.Module):
         key: Optional[jax.random.PRNGKey] = None,
         is_training: bool = False,
     ) -> Tuple[Carry, Dict[str, jnp.ndarray]]:
+        inner, steps, data = self._filter_halting(carry, batch)
 
-        # Apply halting to carry - only update to new batch if halt is True
-        inner = self.reset_carry(carry.halted, carry.inner_carry)
-        steps = jnp.where(carry.halted, 0, carry.steps)
-        inputs = jnp.where(
-            carry.halted[:, None], batch["inputs"], carry.current_data["inputs"]
-        )
-        labels = jnp.where(
-            carry.halted[:, None], batch["labels"], carry.current_data["labels"]
-        )
-        pids = jnp.where(
-            carry.halted,
-            batch["puzzle_identifiers"],
-            carry.current_data["puzzle_identifiers"],
-        )
-        data = {"inputs": inputs, "puzzle_identifiers": pids, "labels": labels}
-
-        # Run model forward
-        inner, logits, (q_h, q_c) = self.forward_inner(inner, data)
+        inner, logits, (q_h, q_c) = self._forward_inner(inner, data)
         outputs = {"logits": logits, "q_halt_logits": q_h, "q_continue_logits": q_c}
         steps = steps + 1
-        last = steps >= self.halt_max_steps
-        halted = last
 
-        # Estimate continue Q
+        halted = steps >= self.halt_max_steps
+
         if is_training and self.halt_max_steps > 1:
-            halted |= q_h > q_c
-            if key is not None:
-                e_key, h_key = jax.random.split(key)
-                explore = (
-                    jax.random.uniform(e_key, q_h.shape) < self.halt_exploration_prob
-                )
-                min_step = jnp.where(explore, jax.random.randint(h_key, steps.shape, 2, self.halt_max_steps + 1), 0)
-                halted &= steps >= min_step
-            nxt_inner, _, (n_q_h, n_q_c) = self.forward_inner(inner, data)
-            next_q = jnp.where(last, n_q_h, jnp.maximum(n_q_h, n_q_c))
-            outputs["target_q_continue"] = jax.nn.sigmoid(next_q)
+            halted, target_q_continue = self._halt_logic(
+                inner, data, steps, q_h, q_c, key
+            )
+            outputs["target_q_continue"] = target_q_continue
+
         return Carry(inner, steps, halted, data), outputs
