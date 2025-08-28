@@ -38,7 +38,7 @@ def act_loss_fn(
 
     q_halt_loss = bce_with_logits(
         outputs["q_halt_logits"].astype(jnp.float32),
-        seq_correct.astype(jnp.float32),
+        jax.lax.stop_gradient(seq_correct.astype(jnp.float32)), # TODO double check
     ).mean()
 
     q_cont_loss = jnp.array(0.0, dtype=jnp.float32)
